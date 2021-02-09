@@ -837,7 +837,7 @@ dependencies = [
  "console",
  "eaglesong",
  "futures 0.1.29",
- "hyper 0.12.35",
+ "hyper 0.13.10",
  "hyper-tls 0.3.2",
  "indicatif",
  "lru",
