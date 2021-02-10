@@ -353,14 +353,15 @@ fn test_discovery_behavior() {
         &node2,
         TargetProtocol::Single(SupportProtocols::Identify.protocol_id()),
     );
+    wait_connect_state(&node1, 1);
+
     node3.dial(
         &node2,
         TargetProtocol::Single(SupportProtocols::Identify.protocol_id()),
     );
-
-    wait_connect_state(&node1, 1);
-    wait_connect_state(&node2, 2);
     wait_connect_state(&node3, 1);
+
+    wait_connect_state(&node2, 2);
 
     wait_discovery(&node3);
 
