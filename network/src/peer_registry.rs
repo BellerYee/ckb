@@ -2,7 +2,7 @@
 use crate::peer_store::PeerStore;
 use crate::{
     errors::{Error, PeerError},
-    Peer, PeerId, SessionType,
+    extract_peer_id, Peer, PeerId, SessionType,
 };
 use ckb_logger::debug;
 use p2p::{multiaddr::Multiaddr, SessionId};
@@ -22,7 +22,7 @@ pub struct PeerRegistry {
     max_outbound: u32,
     // Only whitelist peers or allow all peers.
     whitelist_only: bool,
-    whitelist_peers: HashSet<PeerId>,
+    whitelist_peers: HashSet<Multiaddr>,
     feeler_peers: HashSet<PeerId>,
 }
 
@@ -57,7 +57,7 @@ impl PeerRegistry {
         max_inbound: u32,
         max_outbound: u32,
         whitelist_only: bool,
-        whitelist_peers: Vec<PeerId>,
+        whitelist_peers: Vec<Multiaddr>,
     ) -> Self {
         let whitelist_peers_set = HashSet::from_iter(whitelist_peers);
         PeerRegistry {
@@ -72,7 +72,6 @@ impl PeerRegistry {
 
     pub(crate) fn accept_peer(
         &mut self,
-        peer_id: PeerId,
         remote_addr: Multiaddr,
         session_id: SessionId,
         session_type: SessionType,
@@ -81,11 +80,16 @@ impl PeerRegistry {
         if self.peers.contains_key(&session_id) {
             return Err(PeerError::SessionExists(session_id).into());
         }
+        let peer_id = extract_peer_id(&remote_addr).expect("opened session should have peer id");
         if self.get_key_by_peer_id(&peer_id).is_some() {
             return Err(PeerError::PeerIdExists(peer_id).into());
         }
 
-        let is_whitelist = self.whitelist_peers.contains(&peer_id);
+        let is_whitelist = self.whitelist_peers.iter().any(|whitelist_peer| {
+            extract_peer_id(whitelist_peer)
+                .map(|pid| pid == peer_id)
+                .unwrap_or_default()
+        });
         let mut evicted_peer: Option<Peer> = None;
 
         if !is_whitelist {
@@ -110,8 +114,8 @@ impl PeerRegistry {
                 return Err(PeerError::ReachMaxOutboundLimit.into());
             }
         }
-        peer_store.add_connected_peer(peer_id.clone(), remote_addr.clone(), session_type)?;
-        let peer = Peer::new(session_id, session_type, peer_id, remote_addr, is_whitelist);
+        peer_store.add_connected_peer(remote_addr.clone(), session_type)?;
+        let peer = Peer::new(session_id, session_type, remote_addr, is_whitelist);
         self.peers.insert(session_id, peer);
         Ok(evicted_peer)
     }
@@ -182,24 +186,30 @@ impl PeerRegistry {
         // randomly evict a peer
         let mut rng = thread_rng();
         evict_group.choose(&mut rng).map(|peer| {
-            debug!("evict inbound peer {:?}", peer.peer_id);
+            debug!("evict inbound peer {:?}", peer.connected_addr);
             peer.session_id
         })
     }
 
     /// Add feeler dail task
-    pub fn add_feeler(&mut self, peer_id: PeerId) {
-        self.feeler_peers.insert(peer_id);
+    pub fn add_feeler(&mut self, addr: &Multiaddr) {
+        if let Some(peer_id) = extract_peer_id(addr) {
+            self.feeler_peers.insert(peer_id);
+        }
     }
 
     /// Remove feeler dail task on session disconnects or fails
-    pub fn remove_feeler(&mut self, peer_id: &PeerId) {
-        self.feeler_peers.remove(peer_id);
+    pub fn remove_feeler(&mut self, addr: &Multiaddr) {
+        if let Some(peer_id) = extract_peer_id(addr) {
+            self.feeler_peers.remove(&peer_id);
+        }
     }
 
     /// Whether this session is feeler session
-    pub fn is_feeler(&self, peer_id: &PeerId) -> bool {
-        self.feeler_peers.contains(peer_id)
+    pub fn is_feeler(&self, addr: &Multiaddr) -> bool {
+        extract_peer_id(addr)
+            .map(|peer_id| self.feeler_peers.contains(&peer_id))
+            .unwrap_or_default()
     }
 
     /// Get peer info
@@ -218,18 +228,15 @@ impl PeerRegistry {
 
     /// Get session id by peer id
     pub fn get_key_by_peer_id(&self, peer_id: &PeerId) -> Option<SessionId> {
-        self.peers.values().find_map(|peer| {
-            if &peer.peer_id == peer_id {
-                Some(peer.session_id)
-            } else {
-                None
-            }
+        self.peers.iter().find_map(|(session_id, peer)| {
+            extract_peer_id(&peer.connected_addr).and_then(|pid| {
+                if &pid == peer_id {
+                    Some(*session_id)
+                } else {
+                    None
+                }
+            })
         })
-    }
-
-    pub(crate) fn remove_peer_by_peer_id(&mut self, peer_id: &PeerId) -> Option<Peer> {
-        self.get_key_by_peer_id(peer_id)
-            .and_then(|session_id| self.peers.remove(&session_id))
     }
 
     /// Get all connected peers' information
